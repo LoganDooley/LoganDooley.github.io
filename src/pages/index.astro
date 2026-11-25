@@ -1,30 +1,20 @@
 ---
+import Base from "../layouts/Base.astro"
 ---
 
-<html lang="en">
-	<head>
-		<meta charset="utf-8" />
-		<link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-		<link rel="icon" href="/favicon.ico" />
-		<meta name="viewport" content="width=device-width" />
-		<meta name="generator" content={Astro.generator} />
-		<title>Astro</title>
-	</head>
-	<body>
-		<h1>Astro</h1>
+<Base title="Logan Dooley">
+	<h1>Logan Dooley</h1>
+	<p>Graphics Programmer</p>
 
-		<script>
-		    if (!navigator.gpu) {
-		        console.log("WebGPU is not supported in this browser.");
-		    } else {
-		        const adapter = await navigator.gpu.requestAdapter();
-		        if (!adapter) {
-		            console.log("WebGPU is supported, but no suitable GPU adapter was found.");
-		        } else {
-		            console.log("Got adapter:", adapter);
-		            console.log("Adapter info:", adapter.info);
-		        }
-		    }
-		</script>
-	</body>
-</html>
+	<div style="height: 200vh"></div>
+	<p>Bottom of page check</p>
+
+	<script>
+		if (!navigator.gpu) {
+			console.log("WebGPU is not supported in this browser.");
+		} else {
+			const adapter = await navigator.gpu.requestAdapter();
+			console.log("Adapter:", adapter);
+		}
+	</script>
+</Base>
