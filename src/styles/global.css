@@ -17,9 +17,6 @@ body {
     height: 100%;
     display: block;
     z-index: 0;
-
-    /* Will be replaced when I get WebGPU drawing */
-    background: linear-gradient(to bottom, #5a7fa8, #dfe8f0);
 }
 
 main {

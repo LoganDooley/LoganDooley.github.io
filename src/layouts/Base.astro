@@ -21,5 +21,18 @@ const { title } = Astro.props;
         <main>
             <slot />
         </main>
+
+        <script>
+            import { getGpu } from "../gpu/device";
+            import { Scene } from "../gpu/scene";
+
+            const canvas = document.querySelector<HTMLCanvasElement>("#scene");
+            const gpu = await getGpu();
+
+            if (canvas && gpu) {
+                const scene = new Scene(gpu, canvas);
+                scene.render();
+            }
+        </script>
     </body>
 </html>
