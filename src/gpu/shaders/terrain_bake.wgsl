@@ -25,11 +25,5 @@ fn cs_main(@builtin(global_invocation_id) id: vec3u) {
     let uv = (vec2f(id.xy) + 0.5) / vec2f(size);
     let p = (uv - 0.5) * TERRAIN_SIZE;
 
-    let t = terrain(p);
-    let e = 0.02;
-    let fd = vec2f(
-        terrain(p + vec2f(e, 0.0)).x - terrain(p - vec2f(e, 0.0)).x,
-        terrain(p + vec2f(0.0, e)).x - terrain(p - vec2f(0.0, e)).x,
-    ) / (2.0 * e);
-    textureStore(heightmap, id.xy, vec4f(t.x, fd, 0.0));
+    textureStore(heightmap, id.xy, vec4f(terrain(p), 0.0));
 }
