@@ -12,7 +12,8 @@
     "astro": "astro"
   },
   "dependencies": {
-    "astro": "^7.4.13"
+    "astro": "^7.4.13",
+    "wgpu-matrix": "^3.4.2"
   },
   "devDependencies": {
     "@webgpu/types": "^0.1.74"
