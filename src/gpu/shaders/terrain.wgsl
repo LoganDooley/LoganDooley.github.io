@@ -3,6 +3,7 @@ override TERRAIN_SIZE: f32;
 
 @group(1) @binding(0) var heightmap: texture_2d<f32>;
 @group(1) @binding(1) var heightSampler: sampler;
+@group(1) @binding(2) var trailMask: texture_2d<f32>;
 
 // Returns vec4 of (height, dh/dx, dh/dz, _)
 fn sampleTerrain(xz: vec2f) -> vec4f {
@@ -52,10 +53,15 @@ fn fs_main(in: VsOut) -> @location(0) vec4f {
     let slope = 1.0 - n.y;
     let albedo = mix(snow, rock, smoothstep(0.35, 0.6, slope));
 
+    let trailUv = in.worldPos.xz / TERRAIN_SIZE + 0.5;
+    let run = textureSampleLevel(trailMask, heightSampler, trailUv, 0.0).x;
+    let groomed = vec3f(0.98, 0.99, 1.0);
+    let surface = mix(albedo, groomed, run);
+
     let diffuse = max(dot(n, sun), 0.0);
     let sunColor = vec3f(1.0, 0.95, 0.85) * 0.8;
     let ambient = vec3f(0.30, 0.36, 0.48);
-    var color = albedo * (diffuse * sunColor + ambient);
+    var color = surface * (diffuse * sunColor + ambient);
 
     // Distance based fog
     let dist = length(in.worldPos - frame.cameraPos);

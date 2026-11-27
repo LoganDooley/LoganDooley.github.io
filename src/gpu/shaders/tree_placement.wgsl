@@ -17,6 +17,7 @@ struct DrawArgs {
 @group(0) @binding(1) var heightSampler: sampler;
 @group(0) @binding(2) var<storage, read_write> trees: array<Tree>;
 @group(0) @binding(3) var<storage, read_write> drawArgs: DrawArgs;
+@group(0) @binding(4) var trailMask: texture_2d<f32>;
 
 const TREELINE = 100.0;
 const TREELINE_WOBBLE = 3.0;
@@ -59,6 +60,12 @@ fn cs_main(@builtin(global_invocation_id) id: vec3u) {
     let clumps = fbm2(xz * 0.03 + vec2f(50.0)).x;
     let keepChance = (DENSITY + clumps) * belowTreeline;
     if (hash2(cell + vec2f(7.1, 91.3)) > keepChance) {
+        return;
+    }
+
+    // Runs are clear of trees
+    let clearing = textureSampleLevel(trailMask, heightSampler, uv, 0.0).y;
+    if (clearing > 0.01) {
         return;
     }
 

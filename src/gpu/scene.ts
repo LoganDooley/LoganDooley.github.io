@@ -1,6 +1,8 @@
 import { mat4 } from "wgpu-matrix"
 import { LAYOUT, packLayout } from "./layout"
 import type { GpuContext} from "./device";
+import { planTrails, trailSegments, type HeightGrid, type Trail } from "./trails";
+
 import commonSrc from "./shaders/common.wgsl?raw";
 import skySrc from "./shaders/sky.wgsl?raw";
 import terrainSrc from "./shaders/terrain.wgsl?raw";
@@ -8,6 +10,8 @@ import noiseSrc from "./shaders/noise.wgsl?raw";
 import terrainBakeSrc from "./shaders/terrain_bake.wgsl?raw";
 import treePlacementSrc from "./shaders/tree_placement.wgsl?raw";
 import treesSrc from "./shaders/trees.wgsl?raw";
+import pathGridSrc from "./shaders/path_grid.wgsl?raw";
+import trailMaskSrc from "./shaders/trail_mask.wgsl?raw";
 
 const TERRAIN_GRID = 256;
 const DEPTH_FORMAT: GPUTextureFormat = "depth24plus";
@@ -17,6 +21,10 @@ const HEIGHTMAP_SIZE = 1024;
 const TREE_CANDIDATES = 512;
 const MAX_TREES = TREE_CANDIDATES * TREE_CANDIDATES;
 const TREE_VERTICES = 8 * 3;
+
+const PATH_GRID = 256;
+
+const TRAIL_MASK_SIZE = 1024;
 
 export class Scene {
     private device: GPUDevice;
@@ -44,6 +52,10 @@ export class Scene {
 
     private frameId: number | null = null;
     private topDown = false;
+
+    private trails: Trail[] = [];
+    private generating = false;
+    private trailMask: GPUTexture;
 
     constructor(gpu: GpuContext, canvas: HTMLCanvasElement) {
         this.device = gpu.device;
@@ -91,6 +103,11 @@ export class Scene {
                     binding: 1,
                     visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
                     sampler: { type: "filtering" },
+                },
+                {
+                    binding: 2,
+                    visibility: GPUShaderStage.FRAGMENT,
+                    texture: { sampleType: "float" },
                 },
             ],
         });
@@ -221,6 +238,13 @@ export class Scene {
             minFilter: "linear",
         });
 
+        this.trailMask = this.device.createTexture({
+            label: "trail mask",
+            size: [TRAIL_MASK_SIZE, TRAIL_MASK_SIZE],
+            format: "rgba8unorm",
+            usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING,
+        });
+
         this.terrainBindGroup = this.device.createBindGroup({
             label: "terrain bind group",
             layout: terrainLayout,
@@ -232,6 +256,10 @@ export class Scene {
                 {
                     binding: 1,
                     resource: this.heightSampler,
+                },
+                {
+                    binding: 2,
+                    resource: this.trailMask.createView()
                 },
             ],
         });
@@ -259,7 +287,7 @@ export class Scene {
             ],
         });
 
-        this.generateWorld();
+        void this.generateWorld();
 
         // Resizing
         const observer = new ResizeObserver(() => this.resize());
@@ -284,7 +312,7 @@ export class Scene {
             if (event.key === "n") {
                 LAYOUT.seed.x = Math.random() * 1000;
                 LAYOUT.seed.y = Math.random() * 1000;
-                this.generateWorld();
+                void this.generateWorld();
                 console.log(`seed: { x: ${LAYOUT.seed.x.toFixed(3)}, y: ${LAYOUT.seed.y.toFixed(3)} },`);
             } else if (event.key === "t") {
                 this.topDown = !this.topDown;
@@ -293,9 +321,22 @@ export class Scene {
         console.log("Dev controls: N = new seed, T = toggle top-down view");
     }
 
-    private generateWorld(): void {
-        this.bakeTerrain();
-        this.placeTrees();
+    private async generateWorld(): Promise<void> {
+        if (this.generating) {
+            return;
+        }
+
+        this.generating = true;
+
+        try {
+            this.bakeTerrain();
+            const grid = await this.readHeightGrid();
+            this.trails = planTrails(grid);
+            this.buildTrailMask();
+            this.placeTrees();
+        } finally {
+            this.generating = false;
+        }
     }
 
     private bakeTerrain(): void {
@@ -393,6 +434,10 @@ export class Scene {
                     binding: 3,
                     resource: { buffer: this.drawArgsBuffer }
                 },
+                {
+                    binding: 4,
+                    resource: this.trailMask.createView()
+                }
             ],
         });
 
@@ -410,6 +455,128 @@ export class Scene {
         pass.setPipeline(pipeline);
         pass.setBindGroup(0, bindGroup);
         const workgroups = Math.ceil(TREE_CANDIDATES / 8);
+        pass.dispatchWorkgroups(workgroups, workgroups);
+        pass.end();
+
+        this.device.queue.submit([encoder.finish()]);
+    }
+
+    private async readHeightGrid(): Promise<HeightGrid> {
+        const byteSize = PATH_GRID * PATH_GRID * 4;
+
+        const storage = this.device.createBuffer({
+            label: "path grid",
+            size: byteSize,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+        });
+        const readback = this.device.createBuffer({
+            label: "path grid readback",
+            size: byteSize,
+            usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+        });
+
+        const module = this.device.createShaderModule({
+            label: "path grid shader",
+            code: pathGridSrc
+        });
+        const pipeline = this.device.createComputePipeline({
+            label: "path grid pipeline",
+            layout: "auto",
+            compute: {
+                module, entryPoint: "cs_main",
+                constants: { TERRAIN_SIZE, GRID: PATH_GRID}
+            },
+        });
+        const bindGroup = this.device.createBindGroup({
+            label: "path grid bind group",
+            layout: pipeline.getBindGroupLayout(0),
+            entries: [
+                {
+                    binding: 0,
+                    resource: this.heightmap.createView()
+                },
+                {
+                    binding: 1,
+                    resource: this.heightSampler
+                },
+                {
+                    binding: 2,
+                    resource: { buffer: storage }
+                },
+            ],
+        });
+
+        const encoder = this.device.createCommandEncoder({
+            label: "path grid encoder",
+        });
+        const pass = encoder.beginComputePass({
+            label: "path grid pass"
+        });
+        pass.setPipeline(pipeline);
+        pass.setBindGroup(0, bindGroup);
+
+        pass.dispatchWorkgroups(Math.ceil(PATH_GRID / 8), Math.ceil(PATH_GRID / 8));
+        pass.end();
+        encoder.copyBufferToBuffer(storage, 0, readback, 0, byteSize);
+
+        this.device.queue.submit([encoder.finish()]);
+
+        await readback.mapAsync(GPUMapMode.READ);
+        const heights = new Float32Array(readback.getMappedRange().slice(0));
+        readback.unmap();
+
+        storage.destroy();
+        readback.destroy();
+
+        return { size: PATH_GRID, terrainSize: TERRAIN_SIZE, heights };
+    }
+
+    private buildTrailMask(): void {
+        const data = trailSegments(this.trails);
+        const segmentBuffer = this.device.createBuffer({
+            label: "trail segments",
+            size: data.byteLength,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+        });
+
+        this.device.queue.writeBuffer(segmentBuffer, 0, data);
+
+        const module = this.device.createShaderModule({
+            label: "trail mask shader",
+            code: trailMaskSrc
+        });
+        const pipeline = this.device.createComputePipeline({
+            label: "trail mask pipeline",
+            layout: "auto",
+            compute: {
+                module, entryPoint: "cs_main",
+                constants: { TERRAIN_SIZE}
+            },
+        });
+        const bindGroup = this.device.createBindGroup({
+            label: "trail mask bind group",
+            layout: pipeline.getBindGroupLayout(0),
+            entries: [
+                {
+                    binding: 0,
+                    resource: this.trailMask.createView()
+                },
+                {
+                    binding: 1,
+                    resource: { buffer: segmentBuffer }
+                },
+            ],
+        });
+
+        const encoder = this.device.createCommandEncoder({
+            label: "trail mask encoder",
+        });
+        const pass = encoder.beginComputePass({
+            label: "trail mask pass"
+        });
+        pass.setPipeline(pipeline);
+        pass.setBindGroup(0, bindGroup);
+        const workgroups = Math.ceil(TRAIL_MASK_SIZE / 8);
         pass.dispatchWorkgroups(workgroups, workgroups);
         pass.end();
 
