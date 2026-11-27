@@ -1,11 +1,22 @@
+:root {
+    --bg: #0b1220;
+    --text: #e8eef7;
+    --text-muted: #a3b3c9;
+    --accent: #8ccfff;
+    --panel-bg: rgba(11, 18, 32, 0.78);
+    --panel-border: rgba(255, 255, 255, 0.1);
+    --tag-bg: rgba(140, 207, 255, 0.12);
+    --radius: 12px;
+}
+
 html,
 body {
     margin: 0;
 }
 
 body {
-    background: #0b1220;
-    color: #e8eef7;
+    background: var(--bg);
+    color: var(--text);
     font-family: system-ui, sans-serif;
     line-height: 1.6;
 }
@@ -22,7 +33,59 @@ body {
 main {
     position: relative;
     z-index: 1;
-    max-width: 48rem;
+    max-width: 68rem;
     margin: 0 auto;
     padding: 4rem 1.5rem;
+}
+
+a {
+    color: var(--accent);
+}
+
+.panel {
+    background: var(--panel-bg);
+    border: 1px solid var(--panel-border);
+    border-radius: var(--radius);
+    padding: 1.25rem 1.5rem;
+    backdrop-filter: blur(8px);
+}
+
+.button {
+    display: inline-block;
+    padding: 0.4rem 0.9rem;
+    border: 1px solid var(--panel-border);
+    border-radius: 8px;
+    background: rgba(255, 255, 255, 0.06);
+    color: var(--text);
+    text-decoration: none;
+}
+
+.button:hover {
+    border-color: var(--accent);
+    color: var(--accent);
+}
+
+.section {
+    margin-top: 3rem;
+}
+
+.section h2 {
+    margin: 0 0 1rem;
+}
+
+.card-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(17rem, 1fr));
+    gap: 1rem;
+}
+
+.section-title {
+    display: inline-block;
+    margin: 0 0 1rem;
+    padding: 0.3rem 0.9rem;
+    font-size: 1.25rem;
+    background: var(--panel-bg);
+    border: 1px solid var(--panel-border);
+    border-radius: 8px;
+    backdrop-filter: blur(8px);
 }

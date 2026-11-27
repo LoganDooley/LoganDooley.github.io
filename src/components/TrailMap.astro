@@ -1,0 +1,72 @@
+---
+const entries = [
+    {
+        label: "Projects",
+        href: "#projects",
+        icon: "▲"
+    },
+    {
+        label: "Blog",
+        href: "/blog",
+        icon: "▲"
+    },
+    {
+        label: "Résumé",
+        href: "/Logan_Dooley_Resume.pdf",
+        icon: "⌂"
+    },
+];
+---
+
+<nav class="panel trail-map" aria-label="Site sections">
+    <p class="title">Trail map</p>
+    <ul>
+        {entries.map((entry) => (
+            <li>
+                <a href={entry.href}>
+                    <span class="icon" aria-hidden="true">{entry.icon}</span>
+                    {entry.label}
+                </a>
+            </li>
+        ))}
+    </ul>
+</nav>
+
+<style>
+    .trail-map {
+        min-width: 12rem;
+    }
+
+    .title {
+        margin: 0 0 0.5rem;
+        font-size: 0.75rem;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: var(--text-muted);
+    }
+
+    ul {
+        list-style: none;
+        margin: 0;
+        padding: 0;
+    }
+
+    a {
+        display: flex;
+        gap: 0.6rem;
+        align-items: center;
+        padding: 0.35rem 0;
+        color: var(--text);
+        text-decoration: none;
+    }
+
+    a:hover {
+        color: var(--accent);
+    }
+
+    .icon {
+        width: 1rem;
+        text-align: center;
+        color: var(--text-muted);
+    }
+</style>

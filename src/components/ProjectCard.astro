@@ -1,0 +1,76 @@
+---
+import type { CollectionEntry } from "astro:content";
+
+interface Props {
+    project: CollectionEntry<"projects">;
+}
+
+const { project } = Astro.props;
+const { title, summary, tags, image, imageAlt, repo, video } = project.data;
+---
+
+<article class="panel card">
+    {image && <img src={image} alt={imageAlt ?? ""} loading="lazy" />}
+    <div class="body">
+        <h3>{title}</h3>
+        <p>{summary}</p>
+        <ul class="tags">
+            {tags.map((tag) => <li>{tag}</li>)}
+        </ul>
+        <div class="links">
+            {repo && <a href={repo}>Code</a>}
+            {video && <a href={video}>Video</a>}
+        </div>
+    </div>
+</article>
+
+<style>
+    .card {
+        padding: 0;
+        overflow: hidden;
+        display: flex;
+        flex-direction: column;
+    }
+
+    img {
+        width: 100%;
+        aspect-ratio: 16 / 9;
+        object-fit: cover;
+        display: block;
+    }
+
+    .body {
+        padding: 1rem 1.25rem 1.25rem;
+    }
+
+    h3 {
+        margin: 0 0 0.35rem;
+    }
+
+    p {
+        margin: 0 0 0.75rem;
+        color: var(--text-muted);
+    }
+
+    .tags {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.35rem;
+        list-style: none;
+        margin: 0 0 0.75rem;
+        padding: 0;
+    }
+
+    .tags li {
+        font-size: 0.75rem;
+        padding: 0.15rem 0.5rem;
+        border-radius: 999px;
+        background: var(--tag-bg);
+        color: var(--accent);
+    }
+
+    .links {
+        display: flex;
+        gap: 1rem;
+    }
+</style>

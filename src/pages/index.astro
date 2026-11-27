@@ -1,11 +1,26 @@
 ---
-import Base from "../layouts/Base.astro"
+import { getCollection } from "astro:content";
+import Base from "../layouts/Base.astro";
+import Hero from "../components/Hero.astro";
+import ProjectCard from "../components/ProjectCard.astro";
+import { SITE } from "../site";
+
+const featured = (await getCollection("projects", ({ data }) => data.featured))
+	.sort((a, b) => a.data.order - b.data.order);
 ---
 
-<Base title="Logan Dooley">
-	<h1>Logan Dooley</h1>
-	<p>Graphics Programmer</p>
+<Base title={`${SITE.name}  - ${SITE.role}`}>
+	<Hero />
 
-	<div style="height: 200vh"></div>
-	<p>Bottom of page check</p>
+	<section id="projects" class="section">
+		<h2 class="section-title">Featured projects</h2>
+		<div class="card-grid">
+			{featured.map((project) => <ProjectCard project={project} />)}
+		</div>
+	</section>
+
+	<section class="section panel">
+		<h2>About</h2>
+		<p>{SITE.about}</p>
+	</section>
 </Base>
