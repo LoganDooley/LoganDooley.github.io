@@ -3,6 +3,7 @@ import { LAYOUT, packLayout } from "./layout"
 import type { GpuContext} from "./device";
 import { planTrails, trailSegments, type HeightGrid, type Trail } from "./trails";
 import { OrbitCamera} from "./orbitCamera";
+import { GpuTimer } from "./gpuTimer";
 
 import commonSrc from "./shaders/common.wgsl?raw";
 import skySrc from "./shaders/sky.wgsl?raw";
@@ -14,10 +15,10 @@ import treesSrc from "./shaders/trees.wgsl?raw";
 import pathGridSrc from "./shaders/path_grid.wgsl?raw";
 import trailMaskSrc from "./shaders/trail_mask.wgsl?raw";
 
-const TERRAIN_GRID = 256;
+const TERRAIN_GRID = 512;
 const DEPTH_FORMAT: GPUTextureFormat = "depth24plus";
 const TERRAIN_SIZE = 120;
-const HEIGHTMAP_SIZE = 1024;
+const HEIGHTMAP_SIZE = 2048;
 
 const TREE_CANDIDATES = 512;
 const MAX_TREES = TREE_CANDIDATES * TREE_CANDIDATES;
@@ -26,9 +27,6 @@ const TREE_VERTICES = 8 * 3;
 const PATH_GRID = 256;
 
 const TRAIL_MASK_SIZE = 1024;
-
-const DEFAULT_EYE = [0, 20, 48];
-const DEFAULT_TARGET = [0, 12, -10];
 
 export class Scene {
     private device: GPUDevice;
@@ -62,6 +60,11 @@ export class Scene {
 
     private cameraMode: "default" | "topDown" | "orbit" = "default";
     private orbit = new OrbitCamera();
+    private defaultView = { eye: [0, 20, 48], target: [0, 12, -10] };
+
+    private timer: GpuTimer | null = null;
+    private timingPanel: HTMLElement | null = null;
+    private lastPanelUpdate = 0;
 
     constructor(gpu: GpuContext, canvas: HTMLCanvasElement) {
         this.device = gpu.device;
@@ -149,7 +152,7 @@ export class Scene {
         // Terrain
         const terrainModule = this.device.createShaderModule({
             label: "terrain shader",
-            code: commonSrc + terrainSrc,
+            code: commonSrc + noiseSrc + terrainSrc,
         });
         const terrainConstants = { GRID: TERRAIN_GRID, TERRAIN_SIZE };
         this.terrainPipeline = this.device.createRenderPipeline({
@@ -293,6 +296,10 @@ export class Scene {
             ],
         });
 
+        if (gpu.hasTimestamps) {
+            this.timer = new GpuTimer(this.device, ["sky", "terrain", "trees"]);
+        }
+
         void this.generateWorld();
 
         // Resizing
@@ -324,7 +331,7 @@ export class Scene {
                 this.cameraMode = this.cameraMode === "topDown" ? "default" : "topDown";
             } else if (event.key === "c") {
                 if (this.cameraMode !== "orbit") {
-                    this.orbit.setFromLookAt(DEFAULT_EYE, DEFAULT_TARGET); // start from the default view
+                    this.orbit.setFromLookAt(this.defaultView.eye, this.defaultView.target); // start from the default view
                 }
                 this.cameraMode = this.cameraMode === "orbit" ? "default" : "orbit";
             } else if (event.key === "l") {
@@ -348,7 +355,9 @@ export class Scene {
         try {
             this.bakeTerrain();
             const grid = await this.readHeightGrid();
-            this.trails = planTrails(grid);
+            const plan = planTrails(grid);
+            this.trails = plan.trails;
+            this.defaultView = plan.camera;
             this.buildTrailMask();
             this.placeTrees();
         } finally {
@@ -601,7 +610,7 @@ export class Scene {
     }
 
     private resize(): void {
-        const dpr = Math.min(window.devicePixelRatio, 1.5);
+        const dpr = Math.min(window.devicePixelRatio, 1.0);
         const maxSize = this.device.limits.maxTextureDimension2D;
 
         const width = Math.floor(this.canvas.clientWidth * dpr);
@@ -631,9 +640,14 @@ export class Scene {
         const aspect = this.canvas.width / this.canvas.height;
         const proj = mat4.perspective((50 * Math.PI) / 180, aspect, 0.1, 300);
 
-        const drift = Math.sin(t * 0.1) * 4;
-        let eye = [DEFAULT_EYE[0] + drift, DEFAULT_EYE[1], DEFAULT_EYE[2]];
-        let target = DEFAULT_TARGET;
+        const { eye: viewEye, target: viewTarget } = this.defaultView;
+        const fx = viewTarget[0] - viewEye[0];
+        const fz = viewTarget[2] - viewEye[2];
+        const flat = Math.hypot(fx, fz) || 1;
+        const drift = Math.sin(t * 0.1) * 3;
+
+        let eye = [viewEye[0] - (fz / flat) * drift, viewEye[1], viewEye[2] + (fx / flat) * drift];
+        let target = viewTarget;
         let up = [0, 1, 0];
 
         if (this.cameraMode === "topDown") {
@@ -664,39 +678,78 @@ export class Scene {
         const depth = this.ensureDepthTexture();
 
         const encoder = this.device.createCommandEncoder({ label: "frame" });
-        const pass = encoder.beginRenderPass({
-            label: "main pass",
-            colorAttachments: [
-                {
-                    view: this.context.getCurrentTexture().createView(),
-                    clearValue: { r: 0, g: 0, b: 0, a: 1 },
-                    loadOp: "clear",
-                    storeOp: "store",
+        const colorView = this.context.getCurrentTexture().createView();
+        const depthView = depth.createView();
+
+        const beginPass = (name: string, index: number, clear: boolean) =>
+            encoder.beginRenderPass({
+                label: `${name} pass`,
+                colorAttachments: [
+                    {
+                        view: colorView,
+                        clearValue: { r: 0, g: 0, b: 0, a: 1 },
+                        loadOp: clear ? "clear" : "load",
+                        storeOp: "store",
+                    },
+                ],
+                depthStencilAttachment: {
+                    view: depthView,
+                    depthClearValue: 1.0,
+                    depthLoadOp: clear ? "clear" : "load",
+                    depthStoreOp: "store",
                 },
-            ],
-            depthStencilAttachment: {
-                view: depth.createView(),
-                depthClearValue: 1.0,
-                depthLoadOp: "clear",
-                depthStoreOp: "discard",
-            },
-        });
+                timestampWrites: this.timer?.passWrites(index),
+            });
 
+        let pass = beginPass("sky", 0, true);
         pass.setBindGroup(0, this.frameBindGroup);
-
         pass.setPipeline(this.skyPipeline);
         pass.draw(3);
+        pass.end();
 
+        pass = beginPass("terrain", 1, false);
+        pass.setBindGroup(0, this.frameBindGroup);
         pass.setPipeline(this.terrainPipeline);
         pass.setBindGroup(1, this.terrainBindGroup);
         pass.draw(TERRAIN_GRID * TERRAIN_GRID * 6);
+        pass.end();
 
+        pass = beginPass("trees", 2, false);
+        pass.setBindGroup(0, this.frameBindGroup);
         pass.setPipeline(this.treePipeline);
         pass.setBindGroup(1, this.treeBindGroup);
         pass.drawIndirect(this.drawArgsBuffer, 0);
-
         pass.end();
 
+        this.timer?.resolve(encoder);
         this.device.queue.submit([encoder.finish()]);
+        this.timer?.read();
+        this.updateTimingPanel(timeSeconds);
+    }
+
+    showTimings(): void {
+        if (!this.timer) {
+            console.log("GPU timings unavailable. Timestamp queries not supported.");
+            return;
+        }
+        const panel = document.createElement("pre");
+        panel.className = "panel gpu-timings";
+        document.body.appendChild(panel);
+        this.timingPanel = panel;
+    }
+
+    private updateTimingPanel(t: number): void {
+        if (!this.timer || !this.timingPanel || t - this.lastPanelUpdate < 0.25) {
+            return;
+        }
+        this.lastPanelUpdate = t;
+
+        const rows = this.timer.results();
+        const total = rows.reduce((sum, r) => sum + r.ms, 0);
+        this.timingPanel.textContent = [
+            "GPU frame time",
+            ...rows.map((r) => `${r.name.padEnd(8)} ${r.ms.toFixed(2)} ms`),
+            `${"total".padEnd(8)} ${total.toFixed(2)} ms`,
+        ].join("\n");
     }
 }

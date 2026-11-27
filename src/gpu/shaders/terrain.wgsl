@@ -1,6 +1,10 @@
 override GRID: u32;
 override TERRAIN_SIZE: f32;
 
+const ROCK_EDGE = 0.45;
+const BREAKUP = 0.12;
+const MIN_SOFTNESS = 0.03;
+
 @group(1) @binding(0) var heightmap: texture_2d<f32>;
 @group(1) @binding(1) var heightSampler: sampler;
 @group(1) @binding(2) var trailMask: texture_2d<f32>;
@@ -51,7 +55,13 @@ fn fs_main(in: VsOut) -> @location(0) vec4f {
     let snow = vec3f(0.95, 0.97, 1.0);
     let rock = vec3f(0.35, 0.33, 0.32);
     let slope = 1.0 - n.y;
-    let albedo = mix(snow, rock, smoothstep(0.35, 0.6, slope));
+    let xz = in.worldPos.xz;
+    let breakup = 0.6 * noise2d(xz * 0.4).x + 0.4 * noise2d(xz * 1.3 + vec2f(17.0, 9.0)).x;
+    let rockiness = slope + BREAKUP * breakup;
+
+    let width = max(fwidth(rockiness), MIN_SOFTNESS);
+    let rockAmount = smoothstep(ROCK_EDGE - width, ROCK_EDGE + width, rockiness);
+    let albedo = mix(snow, rock, rockAmount);
 
     let trailUv = in.worldPos.xz / TERRAIN_SIZE + 0.5;
     let run = textureSampleLevel(trailMask, heightSampler, trailUv, 0.0).x;

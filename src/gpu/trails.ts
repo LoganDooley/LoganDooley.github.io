@@ -24,6 +24,16 @@ export interface Trail {
     points: Point[];
 }
 
+export interface Catchment {
+    inArea: Uint8Array;
+    distance: Float32Array;
+}
+
+export interface TrailPlan {
+    trails: Trail[];
+    camera: { eye: number[]; target: number[]};
+}
+
 const NEIGHBOURS: [number, number][] = [
     [1, 0], [-1, 0], [0, 1], [0, -1],
     [1, 1], [1, -1], [-1, 1], [-1, -1]
@@ -33,6 +43,11 @@ const SLOPE_PENALTY = 100;
 const AVOID_RADIUS = 6;
 const AVOID_PENALTY = 4;
 const MERGE_RADIUS = 8;
+const UPHILL_TOLERANCE = 0.05;
+const MAX_RUN_DISTANCE = 60;
+const BASE_CANDIDATES = 6;
+const CAMERA_BACK = 26;
+const CAMERA_CLEARANCE = 5;
 
 export function cellToWorld(grid: HeightGrid, index: number): Point {
     const x = index % grid.size;
@@ -43,59 +58,130 @@ export function cellToWorld(grid: HeightGrid, index: number): Point {
     ];
 }
 
-export function findSummits(grid: HeightGrid, count: number, minSeparation: number): number[] {
+export function findCatchment(grid: HeightGrid, base: number): Catchment {
     const { size, heights } = grid;
-    const margin = Math.floor(size * 0.1);
+    const cellSize = grid.terrainSize / size;
+    const distance = new Float32Array(size * size).fill(Infinity);
+    const inArea = new Uint8Array(size * size);
+    const open = new MinHeap();
 
-    const peaks: number[] = [];
-    for (let z = margin; z < size - margin; z++) {
-        for (let x = margin; x < size - margin; x++) {
-            let i = z * size + x;
-            let isPeak = true;
-            for (const [dx, dz] of NEIGHBOURS) {
-                if (heights[(z + dz) * size + (x + dx)] > heights[i]) {
-                    isPeak = false;
-                    break;
-                }
+    distance[base] = 0;
+    open.push(base, 0);
+
+    while (open.size > 0) {
+        const cell = open.pop();
+        if (inArea[cell]) {
+            continue;
+        }
+        inArea[cell] = 1;
+
+        const cx = cell % size;
+        const cz = Math.floor(cell / size);
+        for (const [dx, dz] of NEIGHBOURS) {
+            const nx = cx + dx;
+            const nz = cz + dz;
+            if (nx < 0 || nz < 0 || nx >= size || nz >= size) {
+                continue;
             }
-            if (isPeak) {
-                peaks.push(i);
+            const next = nz * size + nx;
+            if (inArea[next]) {
+                continue;
+            }
+
+            if (heights[next] < heights[cell] - UPHILL_TOLERANCE) {
+                continue;
+            }
+            const step = (dx !== 0 && dz !== 0 ? Math.SQRT2 : 1) * cellSize;
+            const d = distance[cell] + step;
+            if (d < distance[next]) {
+                distance[next] = d;
+                open.push(next, d);
             }
         }
     }
 
-    peaks.sort((a, b) => heights[b] - heights[a]);
+    return { inArea, distance };
+}
 
+function baseCandidates(grid: HeightGrid, count: number, minSeparation: number): number[] {
+    const { size, heights } = grid;
+    const margin = Math.floor(size * 0.15);
+
+    const cells: number[] = [];
+    for (let z = margin; z < size - margin; z++) {
+        for (let x = margin; x < size - margin; x++) {
+            cells.push(z * size + x);
+        }
+    }
+    // Sort low to high
+    cells.sort((a, b) => heights[a] - heights[b]);
+
+    return pickSeparated(grid, cells, count, minSeparation);
+}
+
+function pickSeparated(grid: HeightGrid, ordered: number[], count: number, minSeparation: number): number[] {
     const chosen: number[] = [];
-    for (const candidate of peaks) {
+    for (const candidate of ordered) {
         const [cx, cz] = cellToWorld(grid, candidate);
-        const farEnough = chosen.every((s) => {
-            const [sx, sz] = cellToWorld(grid, s);
-            return Math.hypot(cx - sx, cz - sz) >= minSeparation;
+        const farEnough = chosen.every((c) => {
+            const [x, z] = cellToWorld(grid, c);
+            return Math.hypot(cx - x, cz - z) >= minSeparation;
         });
         if (farEnough) {
             chosen.push(candidate);
-        }
-        if (chosen.length === count) {
-            break;
-        }
-    }
-    return chosen;
-}
-
-export function findBase(grid: HeightGrid): number {
-    const { size, heights } = grid;
-    const margin = Math.floor(size * 0.1);
-    let best = -1;
-    for (let z = Math.floor(size * 0.6); z < size - margin; z++) {
-        for (let x = margin; x < size - margin; x++) {
-            const i = z * size + x;
-            if (best < 0 || heights[i] < heights[best]) {
-                best = i;
+            if (chosen.length === count) {
+                break;
             }
         }
     }
-    return best;
+
+    return chosen;
+}
+
+function scoreBase(grid: HeightGrid, base: number, catchment: Catchment): number {
+    let top = grid.heights[base];
+    let area = 0;
+    for (let i = 0; i < grid.heights.length; i++) {
+        if (catchment.inArea[i] && catchment.distance[i] <= MAX_RUN_DISTANCE) {
+            area++;
+            top = Math.max(top, grid.heights[i]);
+        }
+    }
+
+    return (top - grid.heights[base]) * Math.sqrt(area);
+}
+
+function chooseBase(grid: HeightGrid): { base: number; catchment: Catchment } {
+    let best = { base: -1, catchment: findCatchment(grid, 0), score: -Infinity };
+    for (const candidate of baseCandidates(grid, BASE_CANDIDATES, 15)) {
+        const catchment = findCatchment(grid, candidate);
+        const score = scoreBase(grid, candidate, catchment);
+        if (score > best.score) {
+            best = { base: candidate, catchment, score };
+        }
+    }
+
+    return { base: best.base, catchment: best.catchment };
+}
+
+function findSummits(grid: HeightGrid, catchment: Catchment, count: number, minSeparation: number): number[] {
+    const { size, heights } = grid;
+    const margin = Math.floor(size * 0.08);
+
+    const cells: number[] = [];
+    for (let z = margin; z < size - margin; z++) {
+        for (let x = margin; x < size - margin; x++) {
+            const i = z * size + x;
+            if (catchment.inArea[i] && catchment.distance[i] <= MAX_RUN_DISTANCE) {
+                cells.push(i);
+            }
+        }
+    }
+
+    // Sort high to low
+    cells.sort((a, b) => heights[b] - heights[a]);
+
+    return pickSeparated(grid, cells, count, minSeparation);
 }
 
 // A* code
@@ -168,7 +254,9 @@ function stepCost(grid: HeightGrid, from: number, to: number, stepLength: number
     return run * (1 + SLOPE_PENALTY * excess * excess + AVOID_PENALTY * avoid[to]);
 }
 
-export function findPath(grid: HeightGrid, start: number, goal: number, range: SlopeRange, avoid: Float32Array,): number[] | null {
+export function findPath(
+    grid: HeightGrid, start: number, goal: number, range: SlopeRange,
+    avoid: Float32Array, allowed: Uint8Array,): number[] | null {
     const { size } = grid;
     const cellSize = grid.terrainSize / size;
     const [goalX, goalZ] = [goal % size, Math.floor(goal / size)];
@@ -207,6 +295,9 @@ export function findPath(grid: HeightGrid, start: number, goal: number, range: S
             }
             const next = nz * size + nx;
             if (closed[next]) {
+                continue;
+            }
+            if (!allowed[next] || grid.heights[next] > grid.heights[current] + UPHILL_TOLERANCE) {
                 continue;
             }
             const stepLength = dx !== 0 && dz !== 0 ? Math.SQRT2 : 1;
@@ -350,9 +441,63 @@ function logTrail(grid: HeightGrid, cells: number[], difficulty: Difficulty): vo
     );
 }
 
-export function planTrails(grid: HeightGrid): Trail[] {
-    const summits = findSummits(grid, 2, 25);
-    const base = findBase(grid);
+function clamp(x: number, min: number, max: number): number {
+    return Math.min(max, Math.max(min, x));
+}
+
+function heightAt(grid: HeightGrid, x: number, z: number): number {
+    const { size } = grid;
+    const cx = clamp(Math.floor((x / grid.terrainSize + 0.5) * size), 0, size - 1);
+    const cz = clamp(Math.floor((z / grid.terrainSize + 0.5) * size), 0, size - 1);
+    return grid.heights[cz * size + cx];
+}
+
+function placeCamera(grid: HeightGrid, base: number, summits: number[]): { eye: number[]; target: number[] } {
+    const [bx, bz] = cellToWorld(grid, base);
+    const baseHeight = grid.heights[base];
+
+    let sx = bx;
+    let sz = bz - 1;
+    let summitHeight = baseHeight + 10;
+    if (summits.length > 0) {
+        sx = 0;
+        sz = 0;
+        summitHeight = 0;
+        for (const s of summits) {
+            const [x, z] = cellToWorld(grid, s);
+            sx += x / summits.length;
+            sz += z / summits.length;
+            summitHeight += grid.heights[s] / summits.length;
+        }
+    }
+
+    const length = Math.hypot(sx - bx, sz - bz) || 1;
+    const dx = (sx - bx) / length;
+    const dz = (sz - bz) / length;
+
+    const limit = grid.terrainSize / 2 - 4;
+    const ex = clamp(bx - dx * CAMERA_BACK, -limit, limit);
+    const ez = clamp(bz - dz * CAMERA_BACK, -limit, limit);
+
+    let ground = baseHeight;
+    for (let i = 0; i <= 20; i++) {
+        const t = i / 20;
+        ground = Math.max(ground, heightAt(grid, ex + (bx - ex) * t, ez + (bz - ez) * t));
+    }
+    const halfway = baseHeight + (summitHeight - baseHeight) * 0.5;
+    const ey = Math.max(ground + CAMERA_CLEARANCE, halfway);
+
+    const target = [
+        bx + (sx - bx) * 0.6,
+        halfway,
+        bz + (sz - bz) * 0.6,
+    ];
+    return { eye: [ex, ey, ez], target };
+}
+
+export function planTrails(grid: HeightGrid): TrailPlan {
+    const { base, catchment } = chooseBase(grid);
+    const summits = findSummits(grid, catchment, 2, 25);
     const endpoints = [base, ...summits].map((c) => cellToWorld(grid, c));
 
     const avoid = new Float32Array(grid.size * grid.size);
@@ -362,7 +507,7 @@ export function planTrails(grid: HeightGrid): Trail[] {
 
     for (const summit of summits) {
         for (const difficulty of order) {
-            const cells = findPath(grid, summit, base, DIFFICULTY[difficulty], avoid);
+            const cells = findPath(grid, summit, base, DIFFICULTY[difficulty], avoid, catchment.inArea);
             if (!cells) {
                 console.warn("No path found from summit", cellToWorld(grid, summit));
                 continue;
@@ -375,5 +520,14 @@ export function planTrails(grid: HeightGrid): Trail[] {
             logTrail(grid, cells, difficulty);
         }
     }
-    return trails;
+
+    const areaCells = catchment.inArea.reduce((sum, v) => sum + v, 0);
+    const [bx, bz] = cellToWorld(grid, base);
+    console.log(
+        `Base at (${bx.toFixed(1)}, ${bz.toFixed(1)}) h=${grid.heights[base].toFixed(1)},` +
+        ` ski area ${((100 * areaCells) / catchment.inArea.length).toFixed(1)}% of the map,` +
+        ` ${summits.length} summits, ${trails.length} runs`,
+    );
+
+    return { trails, camera: placeCamera(grid, base, summits) };
 }
