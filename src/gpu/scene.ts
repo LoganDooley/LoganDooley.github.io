@@ -14,19 +14,45 @@ import treePlacementSrc from "./shaders/tree_placement.wgsl?raw";
 import treesSrc from "./shaders/trees.wgsl?raw";
 import pathGridSrc from "./shaders/path_grid.wgsl?raw";
 import trailMaskSrc from "./shaders/trail_mask.wgsl?raw";
+import treeCullSrc from "./shaders/tree_cull.wgsl?raw";
 
 const TERRAIN_GRID = 512;
 const DEPTH_FORMAT: GPUTextureFormat = "depth24plus";
 const TERRAIN_SIZE = 120;
 const HEIGHTMAP_SIZE = 2048;
 
-const TREE_CANDIDATES = 512;
+const TREE_CANDIDATES = 1024;
 const MAX_TREES = TREE_CANDIDATES * TREE_CANDIDATES;
 const TREE_VERTICES = 8 * 3;
+const TREE_DRAW_DISTANCE = 60;
 
 const PATH_GRID = 256;
 
 const TRAIL_MASK_SIZE = 1024;
+
+function frustumPlanes(m: Float32Array): Float32Array  {
+    const row = (i: number) => [m[i], m[4 + i], m[8 + i], m[12 + i]];
+    const r0 = row(0);
+    const r1 = row(1);
+    const r2 = row(2);
+    const r3 = row(3);
+
+    const planes = [
+        r3.map((v, k) => v + r0[k]), // left
+        r3.map((v, k) => v - r0[k]), // right
+        r3.map((v, k) => v + r1[k]), // bottom
+        r3.map((v, k) => v - r1[k]), // top
+        r2,                          // near (z >= 0)
+        r3.map((v, k) => v - r2[k]), // far  (z <= w)
+    ];
+
+    const out = new Float32Array(24);
+    planes.forEach((p, i) => {
+        const length = Math.hypot(p[0], p[1], p[2]);
+        out.set(p.map((v) => v / length), i * 4);
+    });
+    return out;
+}
 
 export class Scene {
     private device: GPUDevice;
@@ -41,6 +67,14 @@ export class Scene {
     private treeBuffer: GPUBuffer;
     private treeBindGroup: GPUBindGroup;
     private drawArgsBuffer: GPUBuffer;
+
+    private visibleTreeBuffer: GPUBuffer;
+    private visibleArgsBuffer: GPUBuffer;
+    private cullBuffer: GPUBuffer;
+    private cullData = new Float32Array(28);
+    private cullPipeline: GPUComputePipeline;
+    private cullBindGroup: GPUBindGroup;
+    private freezeCulling = false;
 
     private frameBuffer: GPUBuffer;
     private frameBindGroup: GPUBindGroup;
@@ -285,19 +319,74 @@ export class Scene {
             usage: GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST,
         });
 
+        this.visibleTreeBuffer = this.device.createBuffer({
+            label: "visible trees",
+            size: MAX_TREES * 16,
+            usage: GPUBufferUsage.STORAGE,
+        });
+        this.visibleArgsBuffer = this.device.createBuffer({
+            label: "visible tree draw args",
+            size: 4 * 4,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST,
+        });
+        this.cullBuffer = this.device.createBuffer({
+            label: "tree cull params",
+            size: this.cullData.byteLength,
+            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+        });
+
+        const cullModule = this.device.createShaderModule({
+            label: "tree cull shader",
+            code: treeCullSrc
+        });
+        this.cullPipeline = this.device.createComputePipeline({
+            label: "tree cull pipeline",
+            layout: "auto",
+            compute: {
+                module: cullModule,
+                entryPoint: "cs_main"
+            }
+        });
+        this.cullBindGroup = this.device.createBindGroup({
+            label: "tree cull bind group",
+            layout: this.cullPipeline.getBindGroupLayout(0),
+            entries: [
+                {
+                    binding: 0,
+                    resource: { buffer: this.treeBuffer }
+                },
+                {
+                    binding: 1,
+                    resource: { buffer: this.drawArgsBuffer }
+                },
+                {
+                    binding: 2,
+                    resource: { buffer: this.visibleTreeBuffer }
+                },
+                {
+                    binding: 3,
+                    resource: { buffer: this.visibleArgsBuffer }
+                },
+                {
+                    binding: 4,
+                    resource: { buffer: this.cullBuffer }
+                },
+            ],
+        });
+
         this.treeBindGroup = this.device.createBindGroup({
             label: "tree bind group",
             layout: treeLayout,
             entries: [
                 {
                     binding: 0,
-                    resource: { buffer: this.treeBuffer }
+                    resource: { buffer: this.visibleTreeBuffer }
                 }
             ],
         });
 
         if (gpu.hasTimestamps) {
-            this.timer = new GpuTimer(this.device, ["sky", "terrain", "trees"]);
+            this.timer = new GpuTimer(this.device, ["cull", "sky", "terrain", "trees"]);
         }
 
         void this.generateWorld();
@@ -337,6 +426,9 @@ export class Scene {
             } else if (event.key === "l") {
                 const format = (v: number[]) => `[${v.map((n) => n.toFixed(1)).join(", ")}]`;
                 console.log(`camera: { eye: ${format(this.orbit.eye)}, target: ${format(this.orbit.target)} },`);
+            } else if (event.key === "f") {
+                this.freezeCulling = !this.freezeCulling;
+                console.log(`Culling ${this.freezeCulling ? "frozen" : "live"}`);
             }
         });
 
@@ -662,6 +754,14 @@ export class Scene {
         const view = mat4.lookAt(eye, target, up);
         const viewProj = mat4.multiply(proj, view);
 
+        if (!this.freezeCulling) {
+            this.cullData.set(frustumPlanes(viewProj), 0);
+            this.cullData.set(eye, 24);
+            this.cullData[27] = this.cameraMode === "topDown" ? 1000 : TREE_DRAW_DISTANCE;
+
+            this.device.queue.writeBuffer(this.cullBuffer, 0, this.cullData);
+        }
+
         this.frameData.set(viewProj, 0);
         this.frameData.set(eye, 16);
         this.frameData[19] = t;
@@ -680,6 +780,17 @@ export class Scene {
         const encoder = this.device.createCommandEncoder({ label: "frame" });
         const colorView = this.context.getCurrentTexture().createView();
         const depthView = depth.createView();
+
+        this.device.queue.writeBuffer(this.visibleArgsBuffer, 0, new Uint32Array([TREE_VERTICES, 0, 0, 0]));
+
+        const cullPass = encoder.beginComputePass({
+            label: "tree cull pass",
+            timestampWrites: this.timer?.passWrites(0),
+        });
+        cullPass.setPipeline(this.cullPipeline);
+        cullPass.setBindGroup(0, this.cullBindGroup);
+        cullPass.dispatchWorkgroups(Math.ceil(MAX_TREES / 64));
+        cullPass.end();
 
         const beginPass = (name: string, index: number, clear: boolean) =>
             encoder.beginRenderPass({
@@ -701,24 +812,24 @@ export class Scene {
                 timestampWrites: this.timer?.passWrites(index),
             });
 
-        let pass = beginPass("sky", 0, true);
+        let pass = beginPass("sky", 1, true);
         pass.setBindGroup(0, this.frameBindGroup);
         pass.setPipeline(this.skyPipeline);
         pass.draw(3);
         pass.end();
 
-        pass = beginPass("terrain", 1, false);
+        pass = beginPass("terrain", 2, false);
         pass.setBindGroup(0, this.frameBindGroup);
         pass.setPipeline(this.terrainPipeline);
         pass.setBindGroup(1, this.terrainBindGroup);
         pass.draw(TERRAIN_GRID * TERRAIN_GRID * 6);
         pass.end();
 
-        pass = beginPass("trees", 2, false);
+        pass = beginPass("trees", 3, false);
         pass.setBindGroup(0, this.frameBindGroup);
         pass.setPipeline(this.treePipeline);
         pass.setBindGroup(1, this.treeBindGroup);
-        pass.drawIndirect(this.drawArgsBuffer, 0);
+        pass.drawIndirect(this.visibleArgsBuffer, 0);
         pass.end();
 
         this.timer?.resolve(encoder);
