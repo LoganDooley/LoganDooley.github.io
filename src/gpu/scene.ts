@@ -6,11 +6,17 @@ import skySrc from "./shaders/sky.wgsl?raw";
 import terrainSrc from "./shaders/terrain.wgsl?raw";
 import noiseSrc from "./shaders/noise.wgsl?raw";
 import terrainBakeSrc from "./shaders/terrain_bake.wgsl?raw";
+import treePlacementSrc from "./shaders/tree_placement.wgsl?raw";
+import treesSrc from "./shaders/trees.wgsl?raw";
 
 const TERRAIN_GRID = 256;
 const DEPTH_FORMAT: GPUTextureFormat = "depth24plus";
 const TERRAIN_SIZE = 120;
 const HEIGHTMAP_SIZE = 1024;
+
+const TREE_CANDIDATES = 512;
+const MAX_TREES = TREE_CANDIDATES * TREE_CANDIDATES;
+const TREE_VERTICES = 8 * 3;
 
 export class Scene {
     private device: GPUDevice;
@@ -20,6 +26,11 @@ export class Scene {
 
     private skyPipeline: GPURenderPipeline;
     private terrainPipeline: GPURenderPipeline;
+    private treePipeline: GPURenderPipeline;
+
+    private treeBuffer: GPUBuffer;
+    private treeBindGroup: GPUBindGroup;
+    private drawArgsBuffer: GPUBuffer;
 
     private frameBuffer: GPUBuffer;
     private frameBindGroup: GPUBindGroup;
@@ -28,6 +39,7 @@ export class Scene {
     private depthTexture: GPUTexture | null = null;
 
     private heightmap: GPUTexture;
+    private heightSampler: GPUSampler;
     private terrainBindGroup: GPUBindGroup;
 
     private frameId: number | null = null;
@@ -139,6 +151,46 @@ export class Scene {
             },
         });
 
+        // Trees
+        const treeLayout = this.device.createBindGroupLayout({
+            label: "tree layout",
+            entries: [
+                {
+                    binding: 0,
+                    visibility: GPUShaderStage.VERTEX,
+                    buffer: { type: "read-only-storage" },
+                },
+            ],
+        });
+        const treePipelineLayout = this.device.createPipelineLayout({
+            label: "tree pipeline layout",
+            bindGroupLayouts: [frameLayout, treeLayout],
+        });
+
+        const treeModule = this.device.createShaderModule({
+            label: "tree shader",
+            code: commonSrc + treesSrc
+        });
+        this.treePipeline = this.device.createRenderPipeline({
+            label: "tree pipeline",
+            layout: treePipelineLayout,
+            vertex: {
+                module: treeModule,
+                entryPoint: "vs_main",
+            },
+            fragment: {
+                module: treeModule,
+                entryPoint: "fs_main",
+                targets: [{ format: this.format}],
+            },
+            primitive: { cullMode: "none" },
+            depthStencil: {
+                format: DEPTH_FORMAT,
+                depthWriteEnabled: true,
+                depthCompare: "less",
+            },
+        });
+
         // Uniform buffer
         this.frameBuffer = this.device.createBuffer({
             label: "frame uniforms",
@@ -163,7 +215,7 @@ export class Scene {
             usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING,
         });
 
-        const heightSampler = this.device.createSampler({
+        this.heightSampler = this.device.createSampler({
             label: "heightmap sampler",
             magFilter: "linear",
             minFilter: "linear",
@@ -179,12 +231,35 @@ export class Scene {
                 },
                 {
                     binding: 1,
-                    resource: heightSampler,
+                    resource: this.heightSampler,
                 },
             ],
         });
 
-        this.bakeTerrain();
+        this.treeBuffer = this.device.createBuffer({
+            label: "trees",
+            size: MAX_TREES * 16,
+            usage: GPUBufferUsage.STORAGE,
+        });
+
+        this.drawArgsBuffer = this.device.createBuffer({
+            label: "tree draw args",
+            size: 4 * 4,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST,
+        });
+
+        this.treeBindGroup = this.device.createBindGroup({
+            label: "tree bind group",
+            layout: treeLayout,
+            entries: [
+                {
+                    binding: 0,
+                    resource: { buffer: this.treeBuffer }
+                }
+            ],
+        });
+
+        this.generateWorld();
 
         // Resizing
         const observer = new ResizeObserver(() => this.resize());
@@ -209,13 +284,18 @@ export class Scene {
             if (event.key === "n") {
                 LAYOUT.seed.x = Math.random() * 1000;
                 LAYOUT.seed.y = Math.random() * 1000;
-                this.bakeTerrain();
+                this.generateWorld();
                 console.log(`seed: { x: ${LAYOUT.seed.x.toFixed(3)}, y: ${LAYOUT.seed.y.toFixed(3)} },`);
             } else if (event.key === "t") {
                 this.topDown = !this.topDown;
             }
         });
         console.log("Dev controls: N = new seed, T = toggle top-down view");
+    }
+
+    private generateWorld(): void {
+        this.bakeTerrain();
+        this.placeTrees();
     }
 
     private bakeTerrain(): void {
@@ -268,6 +348,68 @@ export class Scene {
 
         // Workgroup size is set to 8, 8 right now
         const workgroups = Math.ceil(HEIGHTMAP_SIZE / 8);
+        pass.dispatchWorkgroups(workgroups, workgroups);
+        pass.end();
+
+        this.device.queue.submit([encoder.finish()]);
+    }
+
+    private placeTrees(): void {
+        const module = this.device.createShaderModule({
+            label: "tree placement shader",
+            code: noiseSrc + treePlacementSrc,
+        });
+
+        const pipeline = this.device.createComputePipeline({
+            label: "tree placement pipeline",
+            layout: "auto",
+            compute: {
+                module,
+                entryPoint: "cs_main",
+                constants: {
+                    TERRAIN_SIZE,
+                    CANDIDATES: TREE_CANDIDATES,
+                },
+            },
+        });
+
+        const bindGroup = this.device.createBindGroup({
+            label: "tree placement bind group",
+            layout: pipeline.getBindGroupLayout(0),
+            entries: [
+                {
+                    binding: 0,
+                    resource: this.heightmap.createView()
+                },
+                {
+                    binding: 1,
+                    resource: this.heightSampler
+                },
+                {
+                    binding: 2,
+                    resource: { buffer: this.treeBuffer }
+                },
+                {
+                    binding: 3,
+                    resource: { buffer: this.drawArgsBuffer }
+                },
+            ],
+        });
+
+        this.device.queue.writeBuffer(
+            this.drawArgsBuffer, 0, new Uint32Array([TREE_VERTICES, 0, 0, 0]),
+        );
+
+        const encoder = this.device.createCommandEncoder({
+            label: "tree placement encoder",
+        });
+
+        const pass = encoder.beginComputePass({
+            label: "tree placement pass"
+        });
+        pass.setPipeline(pipeline);
+        pass.setBindGroup(0, bindGroup);
+        const workgroups = Math.ceil(TREE_CANDIDATES / 8);
         pass.dispatchWorkgroups(workgroups, workgroups);
         pass.end();
 
@@ -354,6 +496,10 @@ export class Scene {
         pass.setPipeline(this.terrainPipeline);
         pass.setBindGroup(1, this.terrainBindGroup);
         pass.draw(TERRAIN_GRID * TERRAIN_GRID * 6);
+
+        pass.setPipeline(this.treePipeline);
+        pass.setBindGroup(1, this.treeBindGroup);
+        pass.drawIndirect(this.drawArgsBuffer, 0);
 
         pass.end();
 
