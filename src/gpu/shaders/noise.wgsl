@@ -55,3 +55,22 @@ fn fbm2(p: vec2f) -> vec3f {
     }
     return sum;
 }
+
+fn ridgedFbm2(p: vec2f) -> vec3f {
+    var sum = vec3f(0.0);
+    var amp = 0.5;
+    var m = mat2x2f(1.0, 0.0, 0.0, 1.0);
+
+    for (var o = 0; o < 6; o++) {
+        let n = noise2d(m * p);
+        let g = transpose(m) * n.yz;
+
+        let r = 1.0 - abs(n.x);
+        let rGrad = -sign(n.x) * g;
+
+        sum += amp * vec3f(r * r, 2.0 * r * rGrad);
+        m = 2.0 * OCTAVE_ROTATION * m;
+        amp *= 0.5;
+    }
+    return sum;
+}

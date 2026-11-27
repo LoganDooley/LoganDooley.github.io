@@ -1,4 +1,5 @@
 import { mat4 } from "wgpu-matrix"
+import { LAYOUT, packLayout } from "./layout"
 import type { GpuContext} from "./device";
 import commonSrc from "./shaders/common.wgsl?raw";
 import skySrc from "./shaders/sky.wgsl?raw";
@@ -30,6 +31,7 @@ export class Scene {
     private terrainBindGroup: GPUBindGroup;
 
     private frameId: number | null = null;
+    private topDown = false;
 
     constructor(gpu: GpuContext, canvas: HTMLCanvasElement) {
         this.device = gpu.device;
@@ -202,6 +204,20 @@ export class Scene {
         this.frameId = requestAnimationFrame(loop);
     }
 
+    enableDevControls(): void {
+        window.addEventListener("keydown", (event) => {
+            if (event.key === "n") {
+                LAYOUT.seed.x = Math.random() * 1000;
+                LAYOUT.seed.y = Math.random() * 1000;
+                this.bakeTerrain();
+                console.log(`seed: { x: ${LAYOUT.seed.x.toFixed(3)}, y: ${LAYOUT.seed.y.toFixed(3)} },`);
+            } else if (event.key === "t") {
+                this.topDown = !this.topDown;
+            }
+        });
+        console.log("Dev controls: N = new seed, T = toggle top-down view");
+    }
+
     private bakeTerrain(): void {
         const module = this.device.createShaderModule({
             label: "terrain bake shader",
@@ -218,10 +234,27 @@ export class Scene {
             },
         });
 
+        const layoutData = packLayout();
+        const layoutBuffer = this.device.createBuffer({
+            label: "terrain layout",
+            size: layoutData.byteLength,
+            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+        });
+        this.device.queue.writeBuffer(layoutBuffer, 0, layoutData);
+
         const bindGroup = this.device.createBindGroup({
             label: "terrain bake bind group",
             layout: pipeline.getBindGroupLayout(0),
-            entries: [{ binding: 0, resource: this.heightmap.createView() }],
+            entries: [
+                {
+                    binding: 0,
+                    resource: this.heightmap.createView()
+                },
+                {
+                    binding: 1,
+                    resource: { buffer: layoutBuffer}
+                },
+            ],
         });
 
         const encoder = this.device.createCommandEncoder({
@@ -272,16 +305,18 @@ export class Scene {
         const aspect = this.canvas.width / this.canvas.height;
         const proj = mat4.perspective((50 * Math.PI) / 180, aspect, 0.1, 300);
 
-        // Rotate around the peak
-        const angle = t * 0.05;
-        const eye = [Math.sin(angle) * 32, 14, Math.cos(angle) * 32];
-        const view = mat4.lookAt(eye, [0, 8, 0], [0, 1, 0]);
+        const drift = Math.sin(t * 0.1) * 4;
+        const eye = this.topDown ? [0, 140, 0] : [drift, 20, 48];
+        const target = this.topDown ? [0, 0, 0] : [0, 12, -10];
+        const up = this.topDown ? [0, 0, -1] : [0, 1, 0];
+        const view = mat4.lookAt(eye, target, up);
         const viewProj = mat4.multiply(proj, view);
 
         this.frameData.set(viewProj, 0);
         this.frameData.set(eye, 16);
         this.frameData[19] = t;
         this.frameData.set([0.5, 0.6, 0.3], 20);
+        this.frameData[23] = this.topDown ? 0 : 0.01;
         this.frameData[24] = this.canvas.width;
         this.frameData[25] = this.canvas.height;
 

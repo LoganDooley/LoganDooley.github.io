@@ -59,7 +59,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4f {
 
     // Distance based fog
     let dist = length(in.worldPos - frame.cameraPos);
-    let fog = 1.0 - exp(-dist * 0.025);
+    let fog = 1.0 - exp(-dist * frame.fogDensity);
     color = mix(color, SKY_HORIZON, fog);
 
     return vec4f(color, 1.0);

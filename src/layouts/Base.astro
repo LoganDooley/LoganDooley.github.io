@@ -32,6 +32,9 @@ const { title } = Astro.props;
             if (canvas && gpu) {
                 const scene = new Scene(gpu, canvas);
                 scene.start();
+                if (import.meta.env.DEV) {
+                    scene.enableDevControls();
+                }
             }
         </script>
     </body>

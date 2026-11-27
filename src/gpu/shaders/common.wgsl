@@ -3,7 +3,7 @@ struct Frame {
     cameraPos: vec3f,
     time: f32,
     sunDir: vec3f,
-    _pad0: f32,
+    fogDensity: f32,
     resolution: vec2f,
     _pad1: vec2f
 };
