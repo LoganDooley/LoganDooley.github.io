@@ -2,6 +2,7 @@ import { mat4 } from "wgpu-matrix"
 import { LAYOUT, packLayout } from "./layout"
 import type { GpuContext} from "./device";
 import { planTrails, trailSegments, type HeightGrid, type Trail } from "./trails";
+import { OrbitCamera} from "./orbitCamera";
 
 import commonSrc from "./shaders/common.wgsl?raw";
 import skySrc from "./shaders/sky.wgsl?raw";
@@ -25,6 +26,9 @@ const TREE_VERTICES = 8 * 3;
 const PATH_GRID = 256;
 
 const TRAIL_MASK_SIZE = 1024;
+
+const DEFAULT_EYE = [0, 20, 48];
+const DEFAULT_TARGET = [0, 12, -10];
 
 export class Scene {
     private device: GPUDevice;
@@ -51,11 +55,13 @@ export class Scene {
     private terrainBindGroup: GPUBindGroup;
 
     private frameId: number | null = null;
-    private topDown = false;
 
     private trails: Trail[] = [];
     private generating = false;
     private trailMask: GPUTexture;
+
+    private cameraMode: "default" | "topDown" | "orbit" = "default";
+    private orbit = new OrbitCamera();
 
     constructor(gpu: GpuContext, canvas: HTMLCanvasElement) {
         this.device = gpu.device;
@@ -315,10 +321,21 @@ export class Scene {
                 void this.generateWorld();
                 console.log(`seed: { x: ${LAYOUT.seed.x.toFixed(3)}, y: ${LAYOUT.seed.y.toFixed(3)} },`);
             } else if (event.key === "t") {
-                this.topDown = !this.topDown;
+                this.cameraMode = this.cameraMode === "topDown" ? "default" : "topDown";
+            } else if (event.key === "c") {
+                if (this.cameraMode !== "orbit") {
+                    this.orbit.setFromLookAt(DEFAULT_EYE, DEFAULT_TARGET); // start from the default view
+                }
+                this.cameraMode = this.cameraMode === "orbit" ? "default" : "orbit";
+            } else if (event.key === "l") {
+                const format = (v: number[]) => `[${v.map((n) => n.toFixed(1)).join(", ")}]`;
+                console.log(`camera: { eye: ${format(this.orbit.eye)}, target: ${format(this.orbit.target)} },`);
             }
         });
-        console.log("Dev controls: N = new seed, T = toggle top-down view");
+
+        this.orbit.attach(() => this.cameraMode === "orbit");
+
+        console.log("Dev controls: N = new seed, T = top-down, C = orbit camera (drag/scroll), L = log camera");
     }
 
     private async generateWorld(): Promise<void> {
@@ -615,9 +632,19 @@ export class Scene {
         const proj = mat4.perspective((50 * Math.PI) / 180, aspect, 0.1, 300);
 
         const drift = Math.sin(t * 0.1) * 4;
-        const eye = this.topDown ? [0, 140, 0] : [drift, 20, 48];
-        const target = this.topDown ? [0, 0, 0] : [0, 12, -10];
-        const up = this.topDown ? [0, 0, -1] : [0, 1, 0];
+        let eye = [DEFAULT_EYE[0] + drift, DEFAULT_EYE[1], DEFAULT_EYE[2]];
+        let target = DEFAULT_TARGET;
+        let up = [0, 1, 0];
+
+        if (this.cameraMode === "topDown") {
+            eye = [0, 140, 0];
+            target = [0, 0, 0];
+            up = [0, 0, -1];
+        } else if (this.cameraMode === "orbit") {
+            eye = this.orbit.eye;
+            target = this.orbit.target;
+        }
+
         const view = mat4.lookAt(eye, target, up);
         const viewProj = mat4.multiply(proj, view);
 
@@ -625,7 +652,7 @@ export class Scene {
         this.frameData.set(eye, 16);
         this.frameData[19] = t;
         this.frameData.set([0.5, 0.6, 0.3], 20);
-        this.frameData[23] = this.topDown ? 0 : 0.01;
+        this.frameData[23] = this.cameraMode === "topDown" ? 0 : 0.01;
         this.frameData[24] = this.canvas.width;
         this.frameData[25] = this.canvas.height;
 
