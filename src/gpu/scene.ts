@@ -15,6 +15,7 @@ import treesSrc from "./shaders/trees.wgsl?raw";
 import pathGridSrc from "./shaders/path_grid.wgsl?raw";
 import trailMaskSrc from "./shaders/trail_mask.wgsl?raw";
 import treeCullSrc from "./shaders/tree_cull.wgsl?raw";
+import treeImpostorsSrc from "./shaders/tree_impostors.wgsl?raw";
 
 const TERRAIN_GRID = 512;
 const DEPTH_FORMAT: GPUTextureFormat = "depth24plus";
@@ -24,7 +25,9 @@ const HEIGHTMAP_SIZE = 2048;
 const TREE_CANDIDATES = 1024;
 const MAX_TREES = TREE_CANDIDATES * TREE_CANDIDATES;
 const TREE_VERTICES = 8 * 3;
+const TREE_NEAR_DISTANCE = 15;
 const TREE_DRAW_DISTANCE = 60;
+const IMPOSTOR_VERTICES = 3;
 
 const PATH_GRID = 256;
 
@@ -69,12 +72,16 @@ export class Scene {
     private drawArgsBuffer: GPUBuffer;
 
     private visibleTreeBuffer: GPUBuffer;
+    private visibleImpostorBuffer: GPUBuffer;
     private visibleArgsBuffer: GPUBuffer;
     private cullBuffer: GPUBuffer;
-    private cullData = new Float32Array(28);
+    private cullData = new Float32Array(32);
     private cullPipeline: GPUComputePipeline;
     private cullBindGroup: GPUBindGroup;
     private freezeCulling = false;
+
+    private impostorPipeline: GPURenderPipeline;
+    private impostorBindGroup: GPUBindGroup;
 
     private frameBuffer: GPUBuffer;
     private frameBindGroup: GPUBindGroup;
@@ -203,7 +210,7 @@ export class Scene {
                 targets: [{ format: this.format }],
                 constants: terrainConstants,
             },
-            primitive: { cullMode: "none" },
+            primitive: { cullMode: "back", frontFace: "cw" },
             depthStencil: {
                 format: DEPTH_FORMAT,
                 depthWriteEnabled: true,
@@ -242,6 +249,30 @@ export class Scene {
                 module: treeModule,
                 entryPoint: "fs_main",
                 targets: [{ format: this.format}],
+            },
+            primitive: { cullMode: "front" },
+            depthStencil: {
+                format: DEPTH_FORMAT,
+                depthWriteEnabled: true,
+                depthCompare: "less",
+            },
+        });
+
+        const impostorModule = this.device.createShaderModule({
+            label: "tree impostor shader",
+            code: commonSrc + treeImpostorsSrc,
+        });
+        this.impostorPipeline = this.device.createRenderPipeline({
+            label: "tree impostor pipeline",
+            layout: treePipelineLayout,
+            vertex: {
+                module: impostorModule,
+                entryPoint: "vs_main",
+            },
+            fragment: {
+                module: impostorModule,
+                entryPoint: "fs_main",
+                targets: [{ format: this.format }],
             },
             primitive: { cullMode: "none" },
             depthStencil: {
@@ -324,9 +355,14 @@ export class Scene {
             size: MAX_TREES * 16,
             usage: GPUBufferUsage.STORAGE,
         });
+        this.visibleImpostorBuffer = this.device.createBuffer({
+            label: "visible impostors",
+            size: MAX_TREES * 16,
+            usage: GPUBufferUsage.STORAGE,
+        });
         this.visibleArgsBuffer = this.device.createBuffer({
             label: "visible tree draw args",
-            size: 4 * 4,
+            size: 8 * 4,
             usage: GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST,
         });
         this.cullBuffer = this.device.createBuffer({
@@ -371,6 +407,10 @@ export class Scene {
                     binding: 4,
                     resource: { buffer: this.cullBuffer }
                 },
+                {
+                    binding: 5,
+                    resource: { buffer: this.visibleImpostorBuffer }
+                },
             ],
         });
 
@@ -383,6 +423,15 @@ export class Scene {
                     resource: { buffer: this.visibleTreeBuffer }
                 }
             ],
+        });
+
+        this.impostorBindGroup = this.device.createBindGroup({
+            label: "tree impostor bind group",
+            layout: treeLayout,
+            entries: [{
+                binding: 0,
+                resource: { buffer: this.visibleImpostorBuffer }
+            }],
         });
 
         if (gpu.hasTimestamps) {
@@ -758,6 +807,7 @@ export class Scene {
             this.cullData.set(frustumPlanes(viewProj), 0);
             this.cullData.set(eye, 24);
             this.cullData[27] = this.cameraMode === "topDown" ? 1000 : TREE_DRAW_DISTANCE;
+            this.cullData[28] = TREE_NEAR_DISTANCE;
 
             this.device.queue.writeBuffer(this.cullBuffer, 0, this.cullData);
         }
@@ -781,7 +831,7 @@ export class Scene {
         const colorView = this.context.getCurrentTexture().createView();
         const depthView = depth.createView();
 
-        this.device.queue.writeBuffer(this.visibleArgsBuffer, 0, new Uint32Array([TREE_VERTICES, 0, 0, 0]));
+        this.device.queue.writeBuffer(this.visibleArgsBuffer, 0, new Uint32Array([TREE_VERTICES, 0, 0, 0, IMPOSTOR_VERTICES, 0, 0, 0]));
 
         const cullPass = encoder.beginComputePass({
             label: "tree cull pass",
@@ -827,9 +877,14 @@ export class Scene {
 
         pass = beginPass("trees", 3, false);
         pass.setBindGroup(0, this.frameBindGroup);
+
         pass.setPipeline(this.treePipeline);
         pass.setBindGroup(1, this.treeBindGroup);
         pass.drawIndirect(this.visibleArgsBuffer, 0);
+
+        pass.setPipeline(this.impostorPipeline);
+        pass.setBindGroup(1, this.impostorBindGroup);
+        pass.drawIndirect(this.visibleArgsBuffer, 16);
         pass.end();
 
         this.timer?.resolve(encoder);
