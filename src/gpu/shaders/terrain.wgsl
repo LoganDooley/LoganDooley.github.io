@@ -26,16 +26,8 @@ struct VsOut {
 
 @vertex
 fn vs_main(@builtin(vertex_index) vi: u32) -> VsOut {
-    // 6 verts per quad
-    let quad = vi / 6u;
-    let corner = vi % 6u;
-
-    var offsets = array<vec2u, 6>(
-        vec2u(0u, 0u), vec2u(1u, 0u), vec2u(0u, 1u),
-        vec2u(0u, 1u), vec2u(1u, 0u), vec2u(1u, 1u),
-    );
-
-    let cell = vec2u(quad % GRID, quad / GRID) + offsets[corner];
+    let pointsPerRow = GRID + 1u;
+    let cell = vec2u(vi % pointsPerRow, vi / pointsPerRow);
     let xz = (vec2f(cell) / f32(GRID) - 0.5) * TERRAIN_SIZE;
 
     let height = sampleTerrain(xz).x;

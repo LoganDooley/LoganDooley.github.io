@@ -67,6 +67,8 @@ export class Scene {
     private terrainPipeline: GPURenderPipeline;
     private treePipeline: GPURenderPipeline;
 
+    private terrainIndexBuffer: GPUBuffer;
+
     private treeBuffer: GPUBuffer;
     private treeBindGroup: GPUBindGroup;
     private drawArgsBuffer: GPUBuffer;
@@ -438,6 +440,8 @@ export class Scene {
             this.timer = new GpuTimer(this.device, ["cull", "sky", "terrain", "trees"]);
         }
 
+        this.terrainIndexBuffer = this.createTerrainIndexBuffer();
+
         void this.generateWorld();
 
         // Resizing
@@ -504,6 +508,31 @@ export class Scene {
         } finally {
             this.generating = false;
         }
+    }
+
+    private createTerrainIndexBuffer(): GPUBuffer {
+        const pointsPerRow = TERRAIN_GRID + 1;
+        const indices = new Uint32Array(TERRAIN_GRID * TERRAIN_GRID * 6);
+
+        let k = 0;
+        for (let z = 0; z < TERRAIN_GRID; z++) {
+            for (let x = 0; x < TERRAIN_GRID; x++) {
+                const a = z * pointsPerRow + x;
+                const b = a + 1;
+                const c = a + pointsPerRow;
+                const d = c + 1;
+                indices.set([a, b, c, c, b, d], k);
+                k += 6;
+            }
+        }
+
+        const buffer = this.device.createBuffer({
+            label: "terrain indices",
+            size: indices.byteLength,
+            usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST,
+        });
+        this.device.queue.writeBuffer(buffer, 0, indices);
+        return buffer;
     }
 
     private bakeTerrain(): void {
@@ -872,7 +901,8 @@ export class Scene {
         pass.setBindGroup(0, this.frameBindGroup);
         pass.setPipeline(this.terrainPipeline);
         pass.setBindGroup(1, this.terrainBindGroup);
-        pass.draw(TERRAIN_GRID * TERRAIN_GRID * 6);
+        pass.setIndexBuffer(this.terrainIndexBuffer, "uint32");
+        pass.drawIndexed(TERRAIN_GRID * TERRAIN_GRID * 6);
         pass.end();
 
         pass = beginPass("trees", 3, false);
